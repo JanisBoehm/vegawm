@@ -1,4 +1,4 @@
-/* See LICENSE file for copyright and license details.
+/* vega window manager is basically a copy of dwm with a few modifications
  *
  * dynamic window manager is designed like any other X client as well. It is
  * driven through handling X events. In contrast to other X clients, a window
@@ -97,6 +97,7 @@ struct Client {
 	Client *snext;
 	Monitor *mon;
 	Window win;
+	unsigned int nogaps; /* EDIT: disablegaps */
 };
 
 typedef struct {
@@ -139,6 +140,7 @@ typedef struct {
 	unsigned int tags;
 	int isfloating;
 	int monitor;
+	unsigned int nogaps; /* EDIT: disablegaps */
 } Rule;
 
 /* function declarations */
@@ -233,6 +235,8 @@ static int xerror(Display *dpy, XErrorEvent *ee);
 static int xerrordummy(Display *dpy, XErrorEvent *ee);
 static int xerrorstart(Display *dpy, XErrorEvent *ee);
 static void zoom(const Arg *arg);
+static void startcompton(void);
+static void togglegaps(const Arg *arg);
 
 /* variables */
 static const char broken[] = "broken";
@@ -298,6 +302,7 @@ applyrules(Client *c)
 		&& (!r->instance || strstr(instance, r->instance)))
 		{
 			c->isfloating = r->isfloating;
+			c->nogaps = r->nogaps;
 			c->tags |= r->tags;
 			for (m = mons; m && m->num != r->monitor; m = m->next);
 			if (m)
@@ -1029,6 +1034,7 @@ manage(Window w, XWindowAttributes *wa)
 	c->w = c->oldw = wa->width;
 	c->h = c->oldh = wa->height;
 	c->oldbw = wa->border_width;
+	c->nogaps = 0;
 
 	updatetitle(c);
 	if (XGetTransientForHint(dpy, w, &trans) && (t = wintoclient(trans))) {
@@ -1653,6 +1659,27 @@ spawn(const Arg *arg)
 }
 
 void
+startcompton(void)
+{
+	if (fork() == 0) {
+		if (dpy)
+			close(ConnectionNumber(dpy));
+		setsid();
+		execvp(((char **)comptoncmd)[0], (char**)comptoncmd);
+		fprintf(stderr, "dwm: execvp %s", ((char**)comptoncmd)[0]);
+		perror(" failed");
+		exit(EXIT_SUCCESS);
+	}
+}
+
+void
+togglegaps(const Arg *arg)
+{
+	gappx = gappx ? 0 : dgappx;
+	tile(selmon);
+}
+
+void
 tag(const Arg *arg)
 {
 	if (selmon->sel && arg->ui & TAGMASK) {
@@ -1673,27 +1700,65 @@ tagmon(const Arg *arg)
 void
 tile(Monitor *m)
 {
-	unsigned int i, n, h, mw, my, ty;
+	unsigned int i, n, h, mw, my, ty, ts, ys, xs;
 	Client *c;
 
-	for (n = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), n++);
+	for (n = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), n++) {
+		if (c->bw == 0) c->bw = borderpx; 
+	}
+
 	if (n == 0)
 		return;
 
-	if (n > m->nmaster)
-		mw = m->nmaster ? m->ww * m->mfact : 0;
-	else
-		mw = m->ww;
-	for (i = my = ty = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), i++)
-		if (i < m->nmaster) {
-			h = (m->wh - my) / (MIN(n, m->nmaster) - i);
-			resize(c, m->wx, m->wy + my, mw - (2*c->bw), h - (2*c->bw), 0);
-			my += HEIGHT(c);
+	if (n == 1 && nexttiled(m->clients)->nogaps != 0) {
+		c = nexttiled(m->clients);
+		c->oldbw = c->bw;
+		c->bw = 0;
+		if (n > m->nmaster)
+			mw = m->nmaster ? m->ww * m->mfact : 0;
+		else
+			mw = m->ww;
+		for (i = my = ty = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), i++)
+			if (i < m->nmaster) {
+				h = (m->wh - my) / (MIN(n, m->nmaster) - i);
+				resize(c, m->wx, m->wy + my, mw - (2*c->bw), h - (2*c->bw), 0);
+				my += HEIGHT(c);
+			} else {
+				h = (m->wh - ty) / (n - i);
+				resize(c, m->wx + mw, m->wy + ty, m->ww - mw - (2*c->bw), h - (2*c->bw), 0);
+				ty += HEIGHT(c);
+			}
+	
+	} else {
+	
+		if (n > m->nmaster) {
+			mw = m->nmaster ? m->ww * m->mfact : 0;
+			ts = m->nmaster ? gappx * 1.5 : gappx * 2;
 		} else {
-			h = (m->wh - ty) / (n - i);
-			resize(c, m->wx + mw, m->wy + ty, m->ww - mw - (2*c->bw), h - (2*c->bw), 0);
-			ty += HEIGHT(c);
+			mw = m->ww;
+			ts = gappx * 2;
 		}
+		for (i = my = ty = ys = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), i++)
+			if (i < m->nmaster) {
+				h = (m->wh - my - (MIN(n, m->nmaster) + 1) * gappx ) / (MIN(n, m->nmaster) - i) ;
+				ys = i * gappx;
+				resize(c, m->wx + gappx, m->wy + my + gappx + ys, mw - (2*c->bw) - ts, h - (2*c->bw), 0);
+				my += HEIGHT(c);
+			} else {
+				/* m->nmaster > 1  yshift on tiles by nmaster * gappx */
+				h = (m->wh - ty - (n - m->nmaster + 1) * gappx ) / (n - i);
+				ys = (i-m->nmaster) * gappx;
+				if (m->nmaster > 0 ) {
+					xs = 0.5 * gappx;
+				} else {
+					xs = gappx;
+					ys += gappx;
+				}
+				resize(c, m->wx + mw + xs, m->wy + ty + gappx + ys, m->ww - mw - (2*c->bw) -ts, h - (2*c->bw), 0);
+				ty += HEIGHT(c);
+			}
+
+	}
 }
 
 void
@@ -2142,6 +2207,7 @@ main(int argc, char *argv[])
 		die("pledge");
 #endif /* __OpenBSD__ */
 	scan();
+	startcompton();
 	run();
 	cleanup();
 	XCloseDisplay(dpy);
